@@ -14,7 +14,7 @@
  * batch, so a transient failure partway through doesn't waste completed
  * work — the loop below just skips already-completed batch/window pairs.
  */
-import { existsSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { SpaceTrackClient } from "./spacetrack-client.js";
 import { parseTleText, type ParsedTle } from "./lib/tle-fetch.js";
 import { propagateAt } from "./lib/propagate.js";
@@ -127,6 +127,8 @@ function buildDailyPositions(noradId: number, tles: ParsedTle[]): DailyPosition[
 }
 
 async function main() {
+  mkdirSync(OUT_DIR, { recursive: true });
+
   if (!existsSync(POPULATION_PATH)) {
     console.error(`Missing ${POPULATION_PATH} — run build-population.ts first.`);
     process.exit(1);
