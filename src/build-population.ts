@@ -10,7 +10,7 @@
  *
  * Output: output/population.json — deduped list of {norad_id, name, source}
  */
-import { writeFileSync, readFileSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { fetchTleGroup } from "./lib/tle-fetch.js";
 
 interface PopulationEntry {
@@ -126,6 +126,7 @@ async function main() {
   }
 
   const population = [...byNorad.values()].sort((a, b) => a.norad_id - b.norad_id);
+  mkdirSync("output", { recursive: true });
   writeFileSync("output/population.json", JSON.stringify(population, null, 2));
 
   console.log(`\nTotal population: ${population.length} unique objects.`);
