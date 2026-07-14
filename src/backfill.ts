@@ -17,7 +17,7 @@
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { SpaceTrackClient } from "./spacetrack-client.js";
 import { parseTleText, type ParsedTle } from "./lib/tle-fetch.js";
-import { propagateAt } from "./lib/propagate.js";
+import { propagateAt, eciToGeo } from "./lib/propagate.js";
 import { screenGeoByDay, screenLeoByDay, type DailyPosition, type OrbitBand } from "./screening.js";
 
 const BATCH_SIZE = 40; // NORAD IDs per Space-Track request — larger batch = fewer requests = faster run
@@ -99,29 +99,34 @@ function detectManeuvers(noradId: number, tles: ParsedTle[]) {
   return events;
 }
 
-/** Builds one position per UTC day per object, using the last known TLE as of each day. */
-function buildDailyPositions(noradId: number, tles: ParsedTle[]): DailyPosition[] {
+/**
+ * Builds one position per UTC day per object, sampled on a SHARED grid
+ * (gridStart, stepping by exactly 1 day) — not derived from this object's
+ * own TLE range. Every object processed for the same window samples at the
+ * exact same absolute instants, which is what makes cross-object comparison
+ * in the screening step meaningful. Uses proper Earth-fixed geodetic
+ * coordinates (see eciToGeo) rather than raw ECI angle.
+ */
+function buildDailyPositions(noradId: number, tles: ParsedTle[], gridStart: Date, gridEnd: Date): DailyPosition[] {
   const sorted = [...tles].sort((a, b) => a.epoch.getTime() - b.epoch.getTime());
   if (sorted.length === 0) return [];
 
   const positions: DailyPosition[] = [];
-  const start = sorted[0].epoch;
-  const end = sorted[sorted.length - 1].epoch;
-
   let tleIdx = 0;
-  for (let t = new Date(start); t <= end; t.setUTCDate(t.getUTCDate() + 1)) {
+
+  for (let t = new Date(gridStart); t <= gridEnd; t.setUTCDate(t.getUTCDate() + 1)) {
+    // Advance to the most recent TLE at-or-before this grid instant. If the
+    // object's first TLE in this window is still in the future relative to
+    // t, skip — no coverage for this grid point yet.
     while (tleIdx + 1 < sorted.length && sorted[tleIdx + 1].epoch <= t) tleIdx++;
+    if (sorted[tleIdx].epoch > t) continue;
+
     const tle = sorted[tleIdx];
     const state = propagateAt(tle.line1, tle.line2, t);
     if (!state) continue;
 
-    const r = Math.sqrt(state.positionKm.x ** 2 + state.positionKm.y ** 2 + state.positionKm.z ** 2);
-    // Crude lat/lng proxy for screening purposes only — not used for the
-    // fine-grained refinement, which re-propagates from real TLEs.
-    const lng = (Math.atan2(state.positionKm.y, state.positionKm.x) * 180) / Math.PI;
-    const lat = (Math.asin(state.positionKm.z / r) * 180) / Math.PI;
-
-    positions.push({ norad_id: noradId, day: fmt(t), lat, lng, altKm: r - 6371 });
+    const geo = eciToGeo(state.positionKm, t);
+    positions.push({ norad_id: noradId, day: fmt(t), lat: geo.lat, lng: geo.lng, altKm: geo.altKm });
   }
   return positions;
 }
@@ -158,6 +163,8 @@ async function main() {
 
         const [start, end] = windows[w];
         console.log(`Batch ${b + 1}/${batches.length}, window ${w + 1}/${windows.length} (${start}..${end})...`);
+        const gridStart = new Date(`${start}T00:00:00Z`);
+        const gridEnd = new Date(`${end}T00:00:00Z`);
 
         const raw = await client.gpHistory(noradIds, start, end);
         const parsed = parseTleText(raw);
@@ -172,7 +179,7 @@ async function main() {
           const maneuvers = detectManeuvers(noradId, tles);
           for (const m of maneuvers) appendFileSync(MANEUVERS_PATH, JSON.stringify(m) + "\n");
 
-          const daily = buildDailyPositions(noradId, tles);
+          const daily = buildDailyPositions(noradId, tles, gridStart, gridEnd);
           for (const d of daily) appendFileSync(DAILY_POSITIONS_PATH, JSON.stringify(d) + "\n");
           allDailyPositions.push(...daily);
 
@@ -204,15 +211,41 @@ async function main() {
   const leoCandidates = screenLeoByDay(leoPositions, orbitBands);
 
   console.log(`GEO candidates: ${geoCandidates.length}, LEO candidates: ${leoCandidates.length}`);
+
+  // Sanity guard: with correct geodetic coordinates and sane thresholds, a
+  // real run should produce candidates in the hundreds, not millions. A
+  // count this high means something is still wrong upstream (bad data,
+  // threshold misconfiguration) — better to say so clearly than to crash
+  // opaquely trying to serialize a multi-GB JSON string (which is exactly
+  // what happened the first time: RangeError: Invalid string length).
+  const SANITY_CAP = 20000;
+  if (geoCandidates.length + leoCandidates.length > SANITY_CAP) {
+    console.error(
+      `\n⚠️  ${geoCandidates.length + leoCandidates.length} total candidates is implausibly high for real ` +
+        `RPO/maneuver activity — writing only the first ${SANITY_CAP} and stopping short of the final ` +
+        `summary. This almost certainly means a bug upstream, not a discovery. Check daily-positions.jsonl ` +
+        `for sane lat/lng values before trusting any of this output.`
+    );
+  }
+
   console.log(
     "These are COARSE, approximate candidates from daily sampling — not confirmed events. " +
       "Next step: fine-grained refinement per candidate (see README.md)."
   );
 
-  writeFileSync(
-    CANDIDATES_PATH,
-    JSON.stringify({ generated_at: new Date().toISOString(), geo: geoCandidates, leo: leoCandidates }, null, 2)
-  );
+  // Stream as JSONL instead of building one giant array + JSON.stringify —
+  // safe regardless of candidate count, and each line is independently
+  // readable even if the process is killed partway through writing.
+  const geoOut = geoCandidates.slice(0, SANITY_CAP);
+  const leoOut = leoCandidates.slice(0, Math.max(0, SANITY_CAP - geoOut.length));
+
+  writeFileSync(CANDIDATES_PATH, ""); // truncate/create
+  appendFileSync(CANDIDATES_PATH, `{"generated_at":${JSON.stringify(new Date().toISOString())},"geo":[\n`);
+  geoOut.forEach((c, i) => appendFileSync(CANDIDATES_PATH, JSON.stringify(c) + (i < geoOut.length - 1 ? ",\n" : "\n")));
+  appendFileSync(CANDIDATES_PATH, `],"leo":[\n`);
+  leoOut.forEach((c, i) => appendFileSync(CANDIDATES_PATH, JSON.stringify(c) + (i < leoOut.length - 1 ? ",\n" : "\n")));
+  appendFileSync(CANDIDATES_PATH, `]}\n`);
+
   console.log(`Written to ${CANDIDATES_PATH}`);
 }
 
