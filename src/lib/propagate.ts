@@ -33,6 +33,35 @@ export function distanceKm(a: EciState["positionKm"], b: EciState["positionKm"])
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+export interface GeoPosition {
+  lat: number;
+  lng: number;
+  altKm: number;
+}
+
+/**
+ * Converts an ECI position to true Earth-fixed lat/lng/altitude via GMST.
+ *
+ * This is NOT the same as atan2(y, x) on the raw ECI coordinates — that
+ * gives the position's angle in the inertial (non-rotating) frame, which
+ * for a GEO object rotates ~360°/day even though its real Earth-fixed
+ * longitude barely moves (that's the entire point of geostationary orbit).
+ * Comparing raw ECI angles across objects sampled at different times of day
+ * is close to comparing random numbers — this is what caused the coarse
+ * screening to flag millions of spurious "neighbors" in the first backfill
+ * run. Always use this function, never raw atan2/asin on ECI coordinates,
+ * for anything that claims to be a geographic position.
+ */
+export function eciToGeo(positionKm: EciState["positionKm"], date: Date): GeoPosition {
+  const gmst = satellite.gstime(date);
+  const geodetic = satellite.eciToGeodetic(positionKm, gmst);
+  return {
+    lat: satellite.degreesLat(geodetic.latitude),
+    lng: satellite.degreesLong(geodetic.longitude),
+    altKm: geodetic.height,
+  };
+}
+
 /**
  * Samples the distance between two objects across a time window.
  * Returns the minimum distance found and the timestamp it occurred at —
