@@ -1,0 +1,45 @@
+name: Historical Backfill
+
+# Manual trigger only — this is an occasional deep research run, not a
+# recurring job. Runs on THIS public repo specifically so it can take hours
+# without touching any private repo's limited Actions minutes budget.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340 # generous ceiling; a full run should finish well under this
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+      - run: npm ci
+
+      - name: Build population (GEO + high-value LEO)
+        run: npm run population -- data/ucs-satellite-database.csv
+
+      - name: Historical backfill + coarse screening
+        run: npm run backfill
+        env:
+          SPACETRACK_IDENTITY: ${{ secrets.SPACETRACK_IDENTITY }}
+          SPACETRACK_PASSWORD: ${{ secrets.SPACETRACK_PASSWORD }}
+
+      - name: Push candidates to Supabase for review
+        run: npm run push
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      # Keep the raw output as a downloadable artifact too — useful for
+      # inspecting the full candidate list beyond what's in Supabase, and as
+      # a recovery point if a later step fails after the expensive backfill.
+      - name: Upload output as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-output
+          path: output/
+          retention-days: 30
