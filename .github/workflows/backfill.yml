@@ -15,8 +15,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: "npm"
-      - run: npm ci
+      - run: npm install
 
       - name: Build population (GEO + high-value LEO)
         run: npm run population -- data/ucs-satellite-database.csv
