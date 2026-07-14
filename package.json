@@ -1,0 +1,22 @@
+{
+  "name": "arguspace-research",
+  "version": "0.1.0",
+  "description": "Historical SDA discovery research — GEO + high-value LEO proximity/maneuver scan over 5 years of Space-Track data",
+  "type": "module",
+  "scripts": {
+    "population": "tsx src/build-population.ts",
+    "backfill": "tsx src/backfill.ts",
+    "push": "tsx src/push-candidates.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^16.4.5",
+    "satellite.js": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "tsx": "^4.16.2",
+    "typescript": "^5.5.3"
+  }
+}
